@@ -1,0 +1,35 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36310.24
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "scoreboard_console_buttons_ESP_NOW", "scoreboard_console_buttons_ESP_NOW\scoreboard_console_buttons_ESP_NOW.vcxproj", "{1EC45701-FD39-4E79-8602-256406E9AC4F}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|ARM = Debug|ARM
+		Debug|ARM64 = Debug|ARM64
+		Release|ARM = Release|ARM
+		Release|ARM64 = Release|ARM64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Debug|ARM.ActiveCfg = Debug|ARM
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Debug|ARM.Build.0 = Debug|ARM
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Debug|ARM.Deploy.0 = Debug|ARM
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Debug|ARM64.Build.0 = Debug|ARM64
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Debug|ARM64.Deploy.0 = Debug|ARM64
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Release|ARM.ActiveCfg = Release|ARM
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Release|ARM.Build.0 = Release|ARM
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Release|ARM.Deploy.0 = Release|ARM
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Release|ARM64.ActiveCfg = Release|ARM64
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Release|ARM64.Build.0 = Release|ARM64
+		{1EC45701-FD39-4E79-8602-256406E9AC4F}.Release|ARM64.Deploy.0 = Release|ARM64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {3EBF6EE0-BD40-4C6C-AE3B-2DBD106B2364}
+	EndGlobalSection
+EndGlobal
