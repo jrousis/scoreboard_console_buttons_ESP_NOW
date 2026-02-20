@@ -1,4 +1,4 @@
-
+﻿
 
 #define INSTR_0 0xA000
 #define INSTR_1 0xA151
@@ -61,10 +61,10 @@ Adafruit_NeoPixel pixel(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 
 #endif
 //--------------------------------------------------------------
-//MAC Address: 38:18:2B:3E:0C:DC
-uint8_t broadcastAddress1[] = { 0x38, 0x18, 0x2B, 0x3E, 0x0C, 0xDC }; // Broadcast address to send data to
-//38:18:2B:3C:AA:8C
-uint8_t broadcastAddress2[] = { 0x38, 0x18, 0x2B, 0x3C, 0xAA, 0x8C }; // Broadcast address to send data to
+//MAC Address: 38:18:2B:3C:D6:20
+uint8_t broadcastAddress1[] = { 0x38, 0x18, 0x2B, 0x3C, 0xD6, 0x20 }; // Broadcast address to send data to
+//38:18:2B:3E:0F:48
+uint8_t broadcastAddress2[] = { 0x38, 0x18, 0x2B, 0x3E, 0x0F, 0x48 }; // Broadcast address to send data to
 
 esp_err_t result;
 
@@ -85,6 +85,8 @@ shot_packet packet_to_slave;
 struct_packet display_packet;
 struct_packet display_received;
 esp_now_peer_info_t peerInfo;
+
+char ascii_buf[8] = {0};
 
 void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
 	Serial.print("\r\nLast Packet Send Status:\t");
@@ -331,31 +333,38 @@ void loop() {
 
 	// Check for incoming serial1 data
 	// expecting 2 bytes looking for instructions from 0xA151 to 0xA158
-	if (Serial1.available() >= 2) {
+	if (Serial1.available() >= 3) {
 		// open LED 
 		digitalWrite(LED_PIN, LOW);
-		uint8_t byte1 = Serial1.read();
-		uint8_t byte2 = Serial1.read();
-		uint16_t instruction = (byte1 << 8) | byte2;
-		if (instruction >= INSTR_0 && instruction <= INSTR_8) {
-			Serial.print("Serial1 data shootclock received: ");
-			Serial.println(instruction, HEX);
-			Send_WiFiNow_to_ShotClock(instruction);
+		uint8_t head_byte = Serial1.read();
+		ascii_buf[0] = Serial1.read();
+		ascii_buf[1] = Serial1.read();
+		
+
+		if (head_byte == 0xA0) {
+			//Print the ascii_buf
+			Serial.println();
+			Serial.print("Serial Instruction 0xA0 Received data: ");
+			for (int i = 0; i < 2; i++) {
+				Serial.print(ascii_buf[i], HEX);
+				Serial.print(" ");
+			}
+			Serial.println();
+
+			Send_WiFiNow_to_ShotClock(head_byte);
 		}
 		// close LED
 		digitalWrite(LED_PIN, HIGH);
 	}
 }
 
-void Send_WiFiNow_to_ShotClock(uint16_t instr)
+void Send_WiFiNow_to_ShotClock(uint8_t instr)
 {
-	if ((instr & 0xFF00) == 0xA000 && (instr & 0x00FF) <100) {
-		byte seconds = instr & 0x00FF;
-		char time_ascii[2];
-		time_ascii[0] = (seconds / 10) + '0';
-		time_ascii[1] = (seconds % 10) + '0';
-		packet_to_slave.time[0] = time_ascii[0]; 
-		packet_to_slave.time[1] = time_ascii[1];
+	if (instr == 0xA0 ) {
+		
+		packet_to_slave.time[0] = ascii_buf[0];
+		packet_to_slave.time[1] = ascii_buf[1];
+
 		esp_err_t result = esp_now_send(broadcastAddress1, (uint8_t*)&packet_to_slave, sizeof(packet_to_slave));
 		if (result != ESP_OK) {
 			Serial.println("WiFiNOW Error sending the data to broadcastAddress1");
