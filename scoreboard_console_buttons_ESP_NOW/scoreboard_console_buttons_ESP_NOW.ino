@@ -19,6 +19,11 @@ uint8_t device_addr = 1;
 // Setup for ESP-NOW
 #include <esp_now.h>
 #include <WiFi.h>
+#include <EEPROM.h>
+
+#define EEPROM_SIZE 128
+#define EEPROM_DEFAULT 0 // 1 byte
+#define EEPROM_PARAMS_START 7 // start address for params
 //--------------------------------------------------------------
 // check if the chip is ESP32-S3
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -60,12 +65,40 @@ Adafruit_NeoPixel pixel(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 #define TXD1 5  //18
 
 #endif
+//---------------------------------------------------------------------
+// make params object to store the parameters
+struct Params {
+	uint8_t Mac_shoot_1[6];
+	uint8_t Mac_shoot_2[6];
+	uint8_t Mac_team_1[6];
+	uint8_t Mac_team_2[6];
+};
+Params params;
+
+void saveParamsToEEPROM() {
+	EEPROM.put(EEPROM_PARAMS_START, params);
+	EEPROM.commit();
+}
+
+void loadParamsFromEEPROM() {
+	EEPROM.get(EEPROM_PARAMS_START, params);
+}
+
 //--------------------------------------------------------------
 //MAC Address: 38:18:2B:3C:D6:20
-uint8_t broadcastAddress1[] = { 0x38, 0x18, 0x2B, 0x3C, 0xD6, 0x20 }; // Broadcast address to send data to
+uint8_t broadcastAddress1[] = { 0x38, 0x18, 0x2B, 0x3C, 0xD6, 0x20 }; // Broadcast address to send data
 //38:18:2B:3E:0F:48
-uint8_t broadcastAddress2[] = { 0x38, 0x18, 0x2B, 0x3E, 0x0F, 0x48 }; // Broadcast address to send data to
+uint8_t broadcastAddress2[] = { 0x38, 0x18, 0x2B, 0x3E, 0x0F, 0x48 }; // Broadcast address to send data
 
+//38:18:2B:3E:41:BC
+uint8_t broadcast_team1[] = { 0x38, 0x18, 0x2B, 0x3E, 0x41, 0xBC }; // Broadcast address to send data
+//38:18:2B:3E:24:D8	
+uint8_t broadcast_team2[] = { 0x38, 0x18, 0x2B, 0x3E, 0x24, 0xD8 }; // Broadcast address to send data
+
+// MAC for console 10:20:BA:75:45:B0
+uint8_t broadcast_console[] = { 0x10, 0x20, 0xBA, 0x75, 0x45, 0xB0 }; // Broadcast address to send data
+
+bool console_online = false;
 esp_err_t result;
 
 typedef struct shot_packet {
@@ -76,13 +109,20 @@ typedef struct shot_packet {
 	uint8_t brightness;
 } shot_packet;
 
-typedef struct struct_packet {
+typedef struct struct_display {
 	uint16_t insrtuction;
 	uint8_t id;
+} struct_display;
+
+typedef struct struct_packet {
+	char insrtuction[8];
+	char device[8];  // CONSOLE
+	uint8_t len;
+	uint8_t data[32];
 } struct_packet;
 
 shot_packet packet_to_slave;
-struct_packet display_packet;
+struct_display display_packet;
 struct_packet display_received;
 esp_now_peer_info_t peerInfo;
 
@@ -109,41 +149,137 @@ void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
 // Callback when data is received
 void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
 	memcpy(&display_received, incomingData, sizeof(display_received));
-	Serial.print("WiFi Packet Lengh: ");
-	Serial.println(len);
-	Serial.print("Device ID: ");
-	Serial.println(display_received.id);
-	Serial.print("Instruction WiFi received: ");
-	Serial.println(display_received.insrtuction, HEX);
+	Serial.println();
+	Serial.print("Device: ");
+	for (int i = 0; i < 7; i++) {
+		Serial.print(display_received.device[i]);
+	}
+	Serial.print(" - Instruction: ");
+	for (int i = 0; i < 8; i++) {
+		Serial.print(display_received.insrtuction[i]);
+	}
+	Serial.print(" - Serial Received data: ");
+	for (int i = 0; i < display_received.len; i++) {
+		Serial.print(display_received.data[i], HEX);
+		Serial.print(" ");
+	}
+	Serial.println();
+
+	// Check if the instruction is "TEAM_A" or "TEAM_B"
+	if (strncmp(display_received.insrtuction, "TEAM_A", 6) == 0) {
+		Serial.println("Received instruction for TEAM A");
+		// Handle TEAM A instruction
+		result = esp_now_send(broadcast_team1, (uint8_t*)&display_received, sizeof(display_received));	
+		if (result == ESP_OK) {
+			Serial.println("WiFiNOW Sent to TEAM A with success");
+		}
+		else {
+			Serial.println("Error sending to TEAM A");
+		}
+	}
+	else if (strncmp(display_received.insrtuction, "TEAM_B", 6) == 0) {
+		Serial.println("Received instruction for TEAM B");
+		// Handle TEAM B instruction
+		result = esp_now_send(broadcast_team2, (uint8_t*)&display_received, sizeof(display_received));
+		if (result == ESP_OK) {
+			Serial.println("WiFiNOW Sent to TEAM B with success");
+		}
+		else {
+			Serial.println("Error sending to TEAM B");
+		}
+	}
+	else {
+		// send to Serial1 the display_received.insrtuction
+		Serial1.println(display_received.insrtuction);
+	}
+
+	if (strncmp(display_received.device, "CONSOLE", 6) == 0 && !console_online) {
+		// detected console connection
+		// copy the received MAC of the sender to broadcast_console
+		
+		console_online = addPeer(mac);
+	}
 
 }
 
-//--------------------------------------------------------------
+//function to add a new peer by MAC
+bool addPeer(const uint8_t* mac) {
+	memcpy(peerInfo.peer_addr, mac, 6);
+	peerInfo.channel = 0;
+	peerInfo.encrypt = false;
+	Serial.println();
+	if (esp_now_add_peer(&peerInfo) != ESP_OK) {		
+		Serial.println("Failed to add the new peer");
+		return false;
+	}
+	else {
 
+		Serial.println("New Peer added successfully");
+		Serial.print("Peer MAC: "); 
+		for (int i = 0; i < 6; i++) {
+			broadcast_console[i] = mac[i];
+			Serial.printf("%02X", peerInfo.peer_addr[i]);
+			if (i < 5) Serial.print(":");
+		}
+		Serial.println();
+		return true;
+	}
+}
+
+
+//--------------------------------------------------------------
 
 void setup() {
 	Serial.begin(115200);
 	Serial1.begin(115200, SERIAL_8N1, RXD1, TXD1);
-	delay(100);
+	EEPROM.begin(EEPROM_SIZE);
 	while (!Serial);
+	delay(10);
 	
+	loadParamsFromEEPROM();
+	memcpy(broadcastAddress1, params.Mac_shoot_1, 6);
+	memcpy(broadcastAddress2, params.Mac_shoot_2, 6);
+	memcpy(broadcast_team1, params.Mac_team_1, 6);
+	memcpy(broadcast_team2, params.Mac_team_2, 6);
+
 	Serial.println();
 	// print the file name and the date of compilation
 	Serial.println(__FILE__); 
 	Serial.println("Compiled at: " __DATE__);	
 	Serial.println("Started Initializing...");
+
+	Serial.println();
 	// Broadcast Address to send data to
-	Serial.print("Broadcast MAC Address to: "); 
+	Serial.println("Broadcast MAC Shot Clock to: "); 
+	Serial.print("MAC 1 = ");
 	for (int i = 0; i < 6; i++) {
 		Serial.printf("%02X", broadcastAddress1[i]);
 		if (i < 5) Serial.print(":");
 	}
 	Serial.println();
-	Serial.print("And to: ");
+	Serial.print("MAC 2 = ");
 	for (int i = 0; i < 6; i++) {
 		Serial.printf("%02X", broadcastAddress2[i]);
 		if (i < 5) Serial.print(":");
 	}
+	Serial.println();
+
+	// Broadcast Address to send data to
+	Serial.println("Broadcast MAC Team modules to: ");
+	Serial.print("MAC 1 = ");
+	for (int i = 0; i < 6; i++) {
+		Serial.printf("%02X", broadcast_team1[i]);
+		if (i < 5) Serial.print(":");
+	}
+	Serial.println();
+	Serial.print("MAC 2 = ");
+	for (int i = 0; i < 6; i++) {
+		Serial.printf("%02X", broadcast_team2[i]);
+		if (i < 5) Serial.print(":");
+	}
+	Serial.println(); Serial.println();
+
+
 	// Initialize the NeoPixel library.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 	pixel.begin();
@@ -204,6 +340,41 @@ void setup() {
 	else {
 		Serial.println("Peer 2 added");
 	}
+
+	// Register peer team 1
+	memcpy(peerInfo.peer_addr, broadcast_team1, 6);
+	peerInfo.channel = 0;
+	peerInfo.encrypt = false;
+	// Add peer
+	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+		Serial.println("Failed to add peer team 1");
+	}
+	else {
+		Serial.println("Peer team 1 added");
+	}
+
+	// Register peer team 2
+	memcpy(peerInfo.peer_addr, broadcast_team2, 6);
+	peerInfo.channel = 0;
+	peerInfo.encrypt = false;
+	// Add peer
+	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+		Serial.println("Failed to add peer team 2");
+	}
+	else {
+		Serial.println("Peer team 2 added");
+	}
+
+	//Register peer for broadcast_console
+	/*memcpy(peerInfo.peer_addr, broadcast_console, 6);
+	peerInfo.channel = 0;
+	peerInfo.encrypt = false;
+	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+		Serial.println("Failed to add peer console");
+	}
+	else {
+		Serial.println("Peer console added");
+	}*/
 
 	Serial.println("Starting Testing");
 	Serial.println("-------------------");
@@ -333,29 +504,234 @@ void loop() {
 
 	// Check for incoming serial1 data
 	// expecting 2 bytes looking for instructions from 0xA151 to 0xA158
-	if (Serial1.available() >= 3) {
-		// open LED 
-		digitalWrite(LED_PIN, LOW);
-		uint8_t head_byte = Serial1.read();
-		ascii_buf[0] = Serial1.read();
-		ascii_buf[1] = Serial1.read();
-		
+	if (Serial1.available() > 0) {
+		String input;
+		bool gotLine = readSerial1LineWithTimeout(input, 200);
+		Serial.println();
 
-		if (head_byte == 0xA0) {
-			//Print the ascii_buf
-			Serial.println();
-			Serial.print("Serial Instruction 0xA0 Received data: ");
-			for (int i = 0; i < 2; i++) {
-				Serial.print(ascii_buf[i], HEX);
-				Serial.print(" ");
+		if (gotLine) {
+			if (gotLine) {
+				input.trim();
+				if (input[0] == 0xA0) {
+					uint8_t head_byte = input[0];
+					ascii_buf[0] = input[1];
+					ascii_buf[1] = input[2];
+					
+					Serial.print("Instruction 0xA0 Received: ");
+					for (int i = 0; i < 2; i++) {
+						Serial.print(ascii_buf[i], HEX);
+						Serial.print(" ");
+					}
+					Serial.println();
+					Send_WiFiNow_to_ShotClock(head_byte);
+
+					// send WiFi now to console the data of shot clock
+					struct_packet packet_to_send;
+					strcpy(packet_to_send.device, "CONSOLE");
+					strcpy(packet_to_send.insrtuction, "SHOTCLK");
+					
+					packet_to_send.len = input.length() - 1;
+					for (int i = 0; i < packet_to_send.len; i++) {
+
+						packet_to_send.data[i] = input[i + 1];
+						Serial.println(packet_to_send.data[i], HEX);
+					}
+					Serial.println();
+					result = esp_now_send(broadcast_console, (uint8_t*)&packet_to_send, sizeof(packet_to_send));
+					if (result == ESP_OK) {
+						Serial.println("WiFiNOW Sent to Console with success");
+					}
+					else {
+						Serial.println("Error sending to Console");
+					}
+
+				}
+				else if (input[0] == 0xC0) {
+					Serial.print("Instruction 0xC0 Received data: ");
+					Serial.println(input.substring(1));
+					Serial.println("In HEX: ");
+					// send WiFi now to console the data
+					struct_packet packet_to_send;
+					strcpy(packet_to_send.device, "CONSOLE");
+					strcpy(packet_to_send.insrtuction, "DISPLAY");
+					packet_to_send.len = input.length() - 1;
+					for (int i = 0; i < packet_to_send.len; i++) {
+
+						packet_to_send.data[i] = input[i + 1];
+						Serial.print(packet_to_send.data[i], HEX); Serial.print(" ");
+					}
+					Serial.println();
+					result = esp_now_send(broadcast_console, (uint8_t*)&packet_to_send, sizeof(packet_to_send));
+					if (result == ESP_OK) {
+						Serial.println("WiFiNOW Sent to Console with success");
+					}
+					else {
+						Serial.println("Error sending to Console");
+					}
+				}
+				else if (input[0] == 0xE0) {
+					Serial.print("Instruction 0xE0 Received data: ");
+					Serial.println(input.substring(1));
+					Serial.println("In HEX: ");
+					for (int i = 1; i < input.length(); i++) {
+						Serial.print(input[i], HEX); Serial.print(" ");
+					}
+					Serial.println();
+
+					// send WiFi now to console the data
+					struct_packet packet_to_send;
+					strcpy(packet_to_send.device, "CONSOLE");
+					if (input[1] == 'A') {
+						strcpy(packet_to_send.insrtuction, "TEAM_A");
+						Serial.println("Team A instruction");
+					}
+					else if (input[1] == 'B') {
+						strcpy(packet_to_send.insrtuction, "TEAM_B");
+						Serial.println("Team B instruction");
+					}
+					packet_to_send.len = input.length() - 1;
+					for (int i = 0; i < packet_to_send.len - 1; i++) {
+						packet_to_send.data[i] = input[i + 2];
+						Serial.print(packet_to_send.data[i], HEX); Serial.print(" ");
+					}
+					Serial.println();
+					if (input[1] == 'A') {
+						result = esp_now_send(broadcast_team1, (uint8_t*)&packet_to_send, sizeof(packet_to_send));
+					}
+					 else if (input[1] == 'B') {
+						result = esp_now_send(broadcast_team2, (uint8_t*)&packet_to_send, sizeof(packet_to_send));
+					}
+					 else {
+						Serial.println("Unknown team instruction");
+						return;
+					}
+					if (result == ESP_OK) {
+						Serial.println("WiFiNOW Sent to Console with success");
+					}
+					else {
+						Serial.println("Error sending to Console");
+					}
+				}
 			}
-			Serial.println();
-
-			Send_WiFiNow_to_ShotClock(head_byte);
 		}
+		//if (head_byte == 0xA0) {
+		//	//Print the ascii_buf
+		//	Serial.println();
+		//	Serial.print("Serial Instruction 0xA0 Received data: ");
+		//	for (int i = 0; i < 2; i++) {
+		//		Serial.print(ascii_buf[i], HEX);
+		//		Serial.print(" ");
+		//	}
+		//	Serial.println();
+
+		//	Send_WiFiNow_to_ShotClock(head_byte);
+		//}
+
 		// close LED
 		digitalWrite(LED_PIN, HIGH);
 	}
+
+	// check if receive data on serial the string "MACShot1:", "MACShot2:", "MACTeam1:" and "MACTeam2:" after that save the MAC address to EEPROM
+	if (Serial.available()) {
+		String input = Serial.readStringUntil('\n');
+		if (input.startsWith("MACShot1:")) {
+			String macStr = input.substring(9);
+			macStr.trim();
+			if (macStr.length() == 17) {
+				int values[6];
+				sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]);
+				for (int i = 0; i < 6; i++) {
+					params.Mac_shoot_1[i] = (uint8_t)values[i];
+				}
+				saveParamsToEEPROM();
+				Serial.print("New MAC Address for Shot Clock 1 set: ");
+				for (int i = 0; i < 6; i++) {
+					Serial.printf("%02X", params.Mac_shoot_1[i]);
+					if (i < 5) Serial.print(":");
+				}
+				Serial.println();
+			}
+		}
+		else if (input.startsWith("MACShot2:")) {
+			String macStr = input.substring(9);
+			macStr.trim();
+			if (macStr.length() == 17) {
+				int values[6];
+				sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]);
+				for (int i = 0; i < 6; i++) {
+					params.Mac_shoot_2[i] = (uint8_t)values[i];
+				}
+				saveParamsToEEPROM();
+				Serial.print("New MAC Address for Shot Clock 2 set: ");
+				for (int i = 0; i < 6; i++) {
+					Serial.printf("%02X", params.Mac_shoot_2[i]);
+					if (i < 5) Serial.print(":");
+				}
+				Serial.println();
+			}
+		}
+		else if (input.startsWith("MACTeam1:")) {
+			String macStr = input.substring(9);
+			macStr.trim();
+			if (macStr.length() == 17) {
+				int values[6];
+				sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]);
+				for (int i = 0; i < 6; i++) {
+					params.Mac_team_1[i] = (uint8_t)values[i];
+				}
+				saveParamsToEEPROM();
+				Serial.print("New MAC Address for Team 1 set: ");
+				for (int i = 0; i < 6; i++) {
+					Serial.printf("%02X", params.Mac_team_1[i]);
+					if (i < 5) Serial.print(":");
+				}
+				Serial.println();
+			}
+		}
+		else if (input.startsWith("MACTeam2:")) {
+			String macStr = input.substring(9);
+			macStr.trim();
+			if (macStr.length() == 17) {
+				int values[6];
+				sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]);
+				for (int i = 0; i < 6; i++) {
+					params.Mac_team_2[i] = (uint8_t)values[i];
+				}
+				saveParamsToEEPROM();
+				Serial.print("New MAC Address for Team 2 set: ");
+				for (int i = 0; i < 6; i++) {
+					Serial.printf("%02X", params.Mac_team_2[i]);
+					if (i < 5) Serial.print(":");
+				}
+				Serial.println();
+			}
+		}
+	}	
+}
+
+// Plan (pseudocode):
+// 1. Add a helper that reads from Serial1 until '\n' or timeout.
+// 2. Accumulate bytes while available and track elapsed time.
+// 3. Return true if a full line was received, otherwise false.
+// 4. Replace readStringUntil call with the helper and handle partial data.
+
+bool readSerial1LineWithTimeout(String& output, unsigned long timeoutMs) {
+	output = "";
+	unsigned long start = millis();
+	while (millis() - start < timeoutMs) {
+		while (Serial1.available() > 0) {
+			char c = static_cast<char>(Serial1.read());
+			if (c == '\r') {
+				continue;
+			}
+			if (c == '\n') {
+				return true;
+			}
+			output += c;
+		}
+		delay(1);
+	}
+	return false;
 }
 
 void Send_WiFiNow_to_ShotClock(uint8_t instr)
@@ -365,7 +741,7 @@ void Send_WiFiNow_to_ShotClock(uint8_t instr)
 		packet_to_slave.time[0] = ascii_buf[0];
 		packet_to_slave.time[1] = ascii_buf[1];
 
-		esp_err_t result = esp_now_send(broadcastAddress1, (uint8_t*)&packet_to_slave, sizeof(packet_to_slave));
+		result = esp_now_send(broadcastAddress1, (uint8_t*)&packet_to_slave, sizeof(packet_to_slave));
 		if (result != ESP_OK) {
 			Serial.println("WiFiNOW Error sending the data to broadcastAddress1");
 		}
@@ -380,7 +756,7 @@ void send_wifinow_inst(uint16_t instr, uint8_t ID)
 {
 	display_packet.id = ID;
 	display_packet.insrtuction = instr;
-	esp_err_t result = esp_now_send(broadcastAddress1, (uint8_t*)&display_packet, sizeof(display_packet));
+	result = esp_now_send(broadcastAddress1, (uint8_t*)&display_packet, sizeof(display_packet));
 	if (result == ESP_OK) {
 		//Serial.println("WiFiNOW Sent with success");
 	}
