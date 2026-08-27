@@ -1,4 +1,5 @@
 ﻿
+#define SHOT_CLOCK_GLOBAL_BROADCAST true
 
 #define INSTR_0 0xA000
 #define INSTR_1 0xA151
@@ -16,8 +17,10 @@ const unsigned long debounceDelay = 75;  // Debounce delay in milliseconds
 unsigned long previousMillis = 0;
 volatile bool buttonPressed = false;  // Volatile variable for interrupt
 uint8_t device_addr = 1;
+bool OnDataSent_enabled = true;
 // Setup for ESP-NOW
 #include <esp_now.h>
+#include "mbedtls/md.h"
 #include <WiFi.h>
 #include <EEPROM.h>
 
@@ -85,6 +88,15 @@ void loadParamsFromEEPROM() {
 }
 
 //--------------------------------------------------------------
+// Define the secret key for HMAC (must be 16 bytes for ESP-NOW encryption)
+static const uint8_t SECRET_KEY[] = { 
+	0x21, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE
+};
+
+
+uint8_t globalBroadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }; // Local broadcast address
+
 //MAC Address: 38:18:2B:3C:D6:20
 uint8_t broadcastAddress1[] = { 0x38, 0x18, 0x2B, 0x3C, 0xD6, 0x20 }; // Broadcast address to send data
 //38:18:2B:3E:0F:48
@@ -99,14 +111,19 @@ uint8_t broadcast_team2[] = { 0x38, 0x18, 0x2B, 0x3E, 0x24, 0xD8 }; // Broadcast
 uint8_t broadcast_console[] = { 0x10, 0x20, 0xBA, 0x75, 0x45, 0xB0 }; // Broadcast address to send data
 
 bool console_online = false;
+uint32_t g_seq = 0;
+uint32_t g_sessionId = 0;
 esp_err_t result;
 
 typedef struct shot_packet {
 	char time[9];
-	uint8_t alarm;
-	uint8_t id;
-	uint8_t buzzer_time;
-	uint8_t brightness;
+	uint8_t time_run = 0;
+	uint8_t shot_run = 0;
+	uint8_t alarm = 0;
+	uint8_t brightness = 0;
+	uint32_t sessionId = 0;
+	uint32_t seq = 0;
+	uint8_t hmac[8] = {0};
 } shot_packet;
 
 typedef struct struct_display {
@@ -129,6 +146,11 @@ esp_now_peer_info_t peerInfo;
 char ascii_buf[8] = {0};
 
 void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
+	if (!OnDataSent_enabled){ 
+		OnDataSent_enabled = true;
+		return; 
+	} // Skip if the callback is disabled
+
 	Serial.print("\r\nLast Packet Send Status:\t");
 	//Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
 	Serial.println(status == 0 ? "Delivery Success" : "Delivery Fail");
@@ -226,6 +248,43 @@ bool addPeer(const uint8_t* mac) {
 	}
 }
 
+//----------------------------------------------
+bool computeHmac8(const uint8_t* data, size_t len, uint8_t out8[8])
+{
+	uint8_t hmac_full[32];
+	mbedtls_md_context_t ctx;
+	mbedtls_md_init(&ctx);
+	if (mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1) != 0) {
+		mbedtls_md_free(&ctx);
+		return false;
+	}
+	if (mbedtls_md_hmac_starts(&ctx, SECRET_KEY, sizeof(SECRET_KEY)) != 0 ||
+		mbedtls_md_hmac_update(&ctx, data, len) != 0 ||
+		mbedtls_md_hmac_finish(&ctx, hmac_full) != 0) {
+		mbedtls_md_free(&ctx);
+		return false;
+	}
+	memcpy(out8, hmac_full, 8); // Use the first 8 bytes of the HMAC
+	mbedtls_md_free(&ctx);
+	return true;
+}
+
+bool signPacket()
+{
+	return computeHmac8((const uint8_t*)&packet_to_slave, offsetof(shot_packet, hmac), packet_to_slave.hmac);
+}
+
+// make sequence add
+void sequence_add() {
+	if (g_seq == UINT32_MAX) {
+		// Rotate session to avoid seq reuse within same session
+		g_sessionId = esp_random();
+		g_seq = 0;
+	}
+
+	packet_to_slave.seq = g_seq++;
+	packet_to_slave.sessionId = g_sessionId;
+}
 
 //--------------------------------------------------------------
 
@@ -382,6 +441,8 @@ void setup() {
 	pixel.setPixelColor(0, pixel.Color(20, 20, 20)); // Blue color
 	pixel.show();
 #endif
+
+	g_sessionId = esp_random();  // Initialize session ID
 }
 
 void loop() {
@@ -523,7 +584,7 @@ void loop() {
 						Serial.print(" ");
 					}
 					Serial.println();
-					Send_WiFiNow_to_ShotClock(head_byte);
+					Send_WiFiNow_to_ShotClock(head_byte);		  // send WiFi now to shot clock the instruction of 0xA0
 
 					// send WiFi now to console the data of shot clock
 					struct_packet packet_to_send;
@@ -537,7 +598,7 @@ void loop() {
 						Serial.println(packet_to_send.data[i], HEX);
 					}
 					Serial.println();
-					result = esp_now_send(broadcast_console, (uint8_t*)&packet_to_send, sizeof(packet_to_send));
+					result = esp_now_send(broadcast_console, (uint8_t*)&packet_to_send, sizeof(packet_to_send));  // send to console the data of shot clock
 					if (result == ESP_OK) {
 						Serial.println("WiFiNOW Sent to Console with success");
 					}
@@ -611,6 +672,12 @@ void loop() {
 					else {
 						Serial.println("Error sending to Console");
 					}
+				}
+				else if (input[0] == 0xAB) {
+					uint8_t brightness_value = input[1];
+					Serial.print("Instruction 0xAB Received for brightness: ");
+					Serial.println(brightness_value);
+					packet_to_slave.brightness = brightness_value;
 				}
 			}
 		}
@@ -736,11 +803,20 @@ bool readSerial1LineWithTimeout(String& output, unsigned long timeoutMs) {
 
 void Send_WiFiNow_to_ShotClock(uint8_t instr)
 {
-	if (instr == 0xA0 ) {
-		
+	if (instr == 0xA0) {
+		sequence_add();
 		packet_to_slave.time[0] = ascii_buf[0];
 		packet_to_slave.time[1] = ascii_buf[1];
-
+				if (!signPacket()) {
+			Serial.println("Failed to sign packet");
+		}
+#if defined(SHOT_CLOCK_GLOBAL_BROADCAST)
+		OnDataSent_enabled = false; // disable the OnDataSent callback to avoid multiple calls for each sent packet
+		result = esp_now_send(globalBroadcastAddress, (uint8_t*)&packet_to_slave, sizeof(packet_to_slave));	  // send to all the devices in range
+		Serial.println("WiFiNOW Sent to all shot clocks in range with success");
+	}
+		
+#else		   		
 		result = esp_now_send(broadcastAddress1, (uint8_t*)&packet_to_slave, sizeof(packet_to_slave));
 		if (result != ESP_OK) {
 			Serial.println("WiFiNOW Error sending the data to broadcastAddress1");
@@ -750,6 +826,9 @@ void Send_WiFiNow_to_ShotClock(uint8_t instr)
 			Serial.println("WiFiNOW Error sending the data to broadcastAddress2");
 		}
 	}
+
+#endif
+
 }
 
 void send_wifinow_inst(uint16_t instr, uint8_t ID)
