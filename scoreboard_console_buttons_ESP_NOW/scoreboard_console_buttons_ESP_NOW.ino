@@ -1,5 +1,4 @@
-﻿
-#define SHOT_CLOCK_GLOBAL_BROADCAST true
+﻿#define SHOT_CLOCK_GLOBAL_BROADCAST true
 
 #define INSTR_0 0xA000
 #define INSTR_1 0xA151
@@ -145,10 +144,10 @@ esp_now_peer_info_t peerInfo;
 
 char ascii_buf[8] = {0};
 
-void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
-	if (!OnDataSent_enabled){ 
+void OnDataSent(const esp_now_send_info_t* info, esp_now_send_status_t status) {
+	if (!OnDataSent_enabled) {
 		OnDataSent_enabled = true;
-		return; 
+		return;
 	} // Skip if the callback is disabled
 
 	Serial.print("\r\nLast Packet Send Status:\t");
@@ -169,7 +168,9 @@ void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
 }
 
 // Callback when data is received
-void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
+void OnDataRecv(const esp_now_recv_info* recv_info, const uint8_t* incomingData, int len) {
+	const uint8_t* mac = recv_info->src_addr; // Extract MAC address from recv_info
+	
 	memcpy(&display_received, incomingData, sizeof(display_received));
 	Serial.println();
 	Serial.print("Device: ");
@@ -762,7 +763,7 @@ void loop() {
 				int values[6];
 				sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]);
 				for (int i = 0; i < 6; i++) {
-					params.Mac_team_2[i] = (uint8_t)values[i];
+				params.Mac_team_2[i] = (uint8_t)values[i];
 				}
 				saveParamsToEEPROM();
 				Serial.print("New MAC Address for Team 2 set: ");
