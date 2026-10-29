@@ -1,4 +1,5 @@
 ﻿#define SHOT_CLOCK_GLOBAL_BROADCAST true
+#define SHOT_CLOCK_GROUP_ID 1
 
 #define INSTR_0 0xA000
 #define INSTR_1 0xA151
@@ -21,10 +22,12 @@ bool OnDataSent_enabled = true;
 #include <esp_now.h>
 #include "mbedtls/md.h"
 #include <WiFi.h>
+#include <esp_mac.h>   // esp_read_mac() - MAC from eFuse
 #include <EEPROM.h>
 
 #define EEPROM_SIZE 128
 #define EEPROM_DEFAULT 0 // 1 byte
+#define EEPROM_MAGIC 0xA5   // marks that EEPROM holds valid params
 #define EEPROM_PARAMS_START 7 // start address for params
 //--------------------------------------------------------------
 // check if the chip is ESP32-S3
@@ -97,14 +100,16 @@ static const uint8_t SECRET_KEY[] = {
 uint8_t globalBroadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }; // Local broadcast address
 
 //MAC Address: 38:18:2B:3C:D6:20
-uint8_t broadcastAddress1[] = { 0x38, 0x18, 0x2B, 0x3C, 0xD6, 0x20 }; // Broadcast address to send data
+// Default = broadcast (FF..FF). Shot clocks / team modules listen to broadcast.
+// A specific MAC can still be set from Serial (MACShot1: / MACShot2: / MACTeam1: / MACTeam2:)
+uint8_t broadcastAddress1[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }; // old: 38:18:2B:3C:D6:20
 //38:18:2B:3E:0F:48
-uint8_t broadcastAddress2[] = { 0x38, 0x18, 0x2B, 0x3E, 0x0F, 0x48 }; // Broadcast address to send data
+uint8_t broadcastAddress2[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }; // old: 38:18:2B:3E:0F:48
 
 //38:18:2B:3E:41:BC
-uint8_t broadcast_team1[] = { 0x38, 0x18, 0x2B, 0x3E, 0x41, 0xBC }; // Broadcast address to send data
+uint8_t broadcast_team1[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }; // old: 38:18:2B:3E:41:BC
 //38:18:2B:3E:24:D8	
-uint8_t broadcast_team2[] = { 0x38, 0x18, 0x2B, 0x3E, 0x24, 0xD8 }; // Broadcast address to send data
+uint8_t broadcast_team2[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }; // old: 38:18:2B:3E:24:D8
 
 // MAC for console 10:20:BA:75:45:B0
 uint8_t broadcast_console[] = { 0x10, 0x20, 0xBA, 0x75, 0x45, 0xB0 }; // Broadcast address to send data
@@ -122,6 +127,7 @@ typedef struct shot_packet {
 	uint8_t brightness = 0;
 	uint32_t sessionId = 0;
 	uint32_t seq = 0;
+	uint8_t groupId = SHOT_CLOCK_GROUP_ID;    // <-- ΝΕΟ: identifiy group to avoid cross-group interference
 	uint8_t hmac[8] = {0};
 } shot_packet;
 
@@ -288,6 +294,26 @@ void sequence_add() {
 }
 
 //--------------------------------------------------------------
+// Add an ESP-NOW peer only if it is not already registered
+void registerPeer(const uint8_t* mac, const char* name) {
+	Serial.printf("Peer %s (%02X:%02X:%02X:%02X:%02X:%02X): ", name,
+		mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	if (esp_now_is_peer_exist(mac)) {
+		Serial.println("already registered");
+		return;
+	}
+	memcpy(peerInfo.peer_addr, mac, 6);
+	peerInfo.channel = 0;
+	peerInfo.encrypt = false;
+	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+		Serial.println("FAILED to add");
+	}
+	else {
+		Serial.println("added");
+	}
+}
+
+//--------------------------------------------------------------
 
 void setup() {
 	Serial.begin(115200);
@@ -297,10 +323,23 @@ void setup() {
 	delay(10);
 	
 	loadParamsFromEEPROM();
-	memcpy(broadcastAddress1, params.Mac_shoot_1, 6);
-	memcpy(broadcastAddress2, params.Mac_shoot_2, 6);
-	memcpy(broadcast_team1, params.Mac_team_1, 6);
-	memcpy(broadcast_team2, params.Mac_team_2, 6);
+	if (EEPROM.read(EEPROM_DEFAULT) != EEPROM_MAGIC) {
+		// First boot: store the defaults (broadcast FF:FF:FF:FF:FF:FF)
+		memcpy(params.Mac_shoot_1, broadcastAddress1, 6);
+		memcpy(params.Mac_shoot_2, broadcastAddress2, 6);
+		memcpy(params.Mac_team_1, broadcast_team1, 6);
+		memcpy(params.Mac_team_2, broadcast_team2, 6);
+		saveParamsToEEPROM();
+		EEPROM.write(EEPROM_DEFAULT, EEPROM_MAGIC);
+		EEPROM.commit();
+		Serial.println("EEPROM empty -> default (broadcast) MACs saved");
+	}
+	else {
+		memcpy(broadcastAddress1, params.Mac_shoot_1, 6);
+		memcpy(broadcastAddress2, params.Mac_shoot_2, 6);
+		memcpy(broadcast_team1, params.Mac_team_1, 6);
+		memcpy(broadcast_team2, params.Mac_team_2, 6);
+	}
 
 	Serial.println();
 	// print the file name and the date of compilation
@@ -362,8 +401,12 @@ void setup() {
 
 	// Set device as a Wi-Fi Station
 	WiFi.mode(WIFI_STA);
-	Serial.print("Machine MAC Address: ");
-	Serial.println(WiFi.macAddress());
+	// WiFi.macAddress() returns 00:00:00:00:00:00 on core 3.x before the netif is up,
+	// so read the STA MAC directly from eFuse
+	uint8_t myMac[6];
+	esp_read_mac(myMac, ESP_MAC_WIFI_STA);
+	Serial.printf("Machine MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+		myMac[0], myMac[1], myMac[2], myMac[3], myMac[4], myMac[5]);
 	// Init ESP-NOW
 	if (esp_now_init() != ESP_OK) {
 		Serial.println("Error initializing ESP-NOW");
@@ -376,54 +419,13 @@ void setup() {
 	esp_now_register_send_cb(OnDataSent);
 	// Register for a callback function that will be called when data is received
 	esp_now_register_recv_cb(OnDataRecv);
-	// Register peer 1
-	memcpy(peerInfo.peer_addr, broadcastAddress1, 6);
-	peerInfo.channel = 0;
-	peerInfo.encrypt = false;
-
-	// Add peer
-	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-		Serial.println("Failed to add peer 1");
-	}
-	else {
-		Serial.println("Peer 1 added");
-	}
-
-	// Register peer 2
-	memcpy(peerInfo.peer_addr, broadcastAddress2, 6);
-	peerInfo.channel = 0;
-	peerInfo.encrypt = false;
-	// Add peer
-	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-		Serial.println("Failed to add peer 2");
-	}
-	else {
-		Serial.println("Peer 2 added");
-	}
-
-	// Register peer team 1
-	memcpy(peerInfo.peer_addr, broadcast_team1, 6);
-	peerInfo.channel = 0;
-	peerInfo.encrypt = false;
-	// Add peer
-	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-		Serial.println("Failed to add peer team 1");
-	}
-	else {
-		Serial.println("Peer team 1 added");
-	}
-
-	// Register peer team 2
-	memcpy(peerInfo.peer_addr, broadcast_team2, 6);
-	peerInfo.channel = 0;
-	peerInfo.encrypt = false;
-	// Add peer
-	if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-		Serial.println("Failed to add peer team 2");
-	}
-	else {
-		Serial.println("Peer team 2 added");
-	}
+	// Register peers. The same MAC (e.g. FF:FF:FF:FF:FF:FF) is added only once,
+	// so duplicates no longer print "Failed to add peer".
+	registerPeer(globalBroadcastAddress, "broadcast");
+	registerPeer(broadcastAddress1, "shot clock 1");
+	registerPeer(broadcastAddress2, "shot clock 2");
+	registerPeer(broadcast_team1, "team 1");
+	registerPeer(broadcast_team2, "team 2");
 
 	//Register peer for broadcast_console
 	/*memcpy(peerInfo.peer_addr, broadcast_console, 6);
@@ -631,6 +633,27 @@ void loop() {
 						Serial.println("Error sending to Console");
 					}
 				}
+				else if (input[0] == 0xC1) {
+					// team fouls HOME, team fouls GUEST, period as ASCII digits: 0xC1 'h' 'g' 'p'
+					Serial.print("Instruction 0xC1 Received data: ");
+					Serial.println(input.substring(1));
+					struct_packet packet_to_send;
+					memset(&packet_to_send, 0, sizeof(packet_to_send));
+					strcpy(packet_to_send.device, "CONSOLE");
+					strcpy(packet_to_send.insrtuction, "FOULS");
+					packet_to_send.len = input.length() - 1;
+					if (packet_to_send.len > sizeof(packet_to_send.data)) packet_to_send.len = sizeof(packet_to_send.data);
+					for (int i = 0; i < packet_to_send.len; i++) {
+						packet_to_send.data[i] = input[i + 1];
+					}
+					result = esp_now_send(broadcast_console, (uint8_t*)&packet_to_send, sizeof(packet_to_send));
+					if (result == ESP_OK) {
+						Serial.println("WiFiNOW Sent to Console with success");
+					}
+					else {
+						Serial.println("Error sending to Console");
+					}
+				}
 				else if (input[0] == 0xE0) {
 					Serial.print("Instruction 0xE0 Received data: ");
 					Serial.println(input.substring(1));
@@ -811,7 +834,7 @@ void Send_WiFiNow_to_ShotClock(uint8_t instr)
 				if (!signPacket()) {
 			Serial.println("Failed to sign packet");
 		}
-#if defined(SHOT_CLOCK_GLOBAL_BROADCAST)
+#if SHOT_CLOCK_GLOBAL_BROADCAST
 		OnDataSent_enabled = false; // disable the OnDataSent callback to avoid multiple calls for each sent packet
 		result = esp_now_send(globalBroadcastAddress, (uint8_t*)&packet_to_slave, sizeof(packet_to_slave));	  // send to all the devices in range
 		Serial.println("WiFiNOW Sent to all shot clocks in range with success");

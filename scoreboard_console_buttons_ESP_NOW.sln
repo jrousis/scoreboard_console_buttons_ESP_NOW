@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 18
-VisualStudioVersion = 18.4.11519.219 insiders
+VisualStudioVersion = 18.4.11519.219
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "scoreboard_console_buttons_ESP_NOW", "scoreboard_console_buttons_ESP_NOW\scoreboard_console_buttons_ESP_NOW.vcxproj", "{1EC45701-FD39-4E79-8602-256406E9AC4F}"
 EndProject
